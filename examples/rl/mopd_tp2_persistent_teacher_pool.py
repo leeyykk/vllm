@@ -154,6 +154,7 @@ class PersistentTeacher:
         gpu_memory_utilization: float,
         logger: JsonlLogger,
         extra_vllm_args: list[str],
+        server_log_dir: Path | None = None,
     ):
         self.spec = spec
         self.gpus = gpus
@@ -161,6 +162,8 @@ class PersistentTeacher:
         self.gpu_memory_utilization = gpu_memory_utilization
         self.logger = logger
         self.extra_vllm_args = extra_vllm_args
+        self.server_log_dir = server_log_dir
+        self._server_log_fh = None
         self.proc: subprocess.Popen | None = None
 
     @property
@@ -203,10 +206,22 @@ class PersistentTeacher:
             gpus=self.gpus,
             cmd=cmd,
         )
+        stdout = subprocess.DEVNULL
+        if self.server_log_dir is not None:
+            self.server_log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = self.server_log_dir / f"{self.spec.name}.vllm.log"
+            self._server_log_fh = log_path.open("a", encoding="utf-8")
+            stdout = self._server_log_fh
+            self.logger.emit(
+                "teacher_server_log",
+                teacher=self.spec.name,
+                path=str(log_path),
+            )
+
         self.proc = subprocess.Popen(
             cmd,
             env=env,
-            stdout=subprocess.DEVNULL,
+            stdout=stdout,
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
@@ -279,6 +294,9 @@ class PersistentTeacher:
         except subprocess.TimeoutExpired:
             os.killpg(self.proc.pid, signal.SIGKILL)
             self.proc.wait(timeout=30)
+        if self._server_log_fh is not None:
+            self._server_log_fh.close()
+            self._server_log_fh = None
 
 
 class PersistentTeacherPool:
@@ -372,6 +390,7 @@ def main() -> None:
     parser.add_argument("--sleep-used-mib-threshold", type=int)
     parser.add_argument("--lock-file", type=Path, default=Path("/tmp/vllm_tp2_pool.lock"))
     parser.add_argument("--log-jsonl", type=Path)
+    parser.add_argument("--server-log-dir", type=Path)
     parser.add_argument("--prompt-logprobs", type=int, default=64)
     parser.add_argument("--smoke-prompt", action="append")
     parser.add_argument(
@@ -396,6 +415,7 @@ def main() -> None:
             gpu_memory_utilization=args.gpu_memory_utilization,
             logger=logger,
             extra_vllm_args=args.extra_vllm_arg,
+            server_log_dir=args.server_log_dir,
         )
         for idx, raw in enumerate(args.teacher)
     ]
